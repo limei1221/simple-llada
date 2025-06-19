@@ -60,7 +60,7 @@ The implementation uses a simplified Transformer encoder architecture:
 
 - **RoPE Positional Embeddings**: Rotary positional embeddings for better sequence modeling
 - **Group Query Attention**: Efficient attention mechanism with grouped queries
-- **Mask Token Handling**: Special handling for the [MASK] token (ID: 126336)
+- **Mask Token Handling**: Special handling for the [MASK] token
 - **Linear Noise Schedule**: Linear noise scheduling for the diffusion process
 
 ## Configuration
@@ -79,19 +79,19 @@ This implementation is based on the following research papers and codebases:
 
 ### Papers
 
-- **LLaDA**: "Large Language Diffusion Models" by the GSAI-ML team. [arXiv:2502.09992](https://arxiv.org/abs/2502.09992)
-- **SMDM**: "Scaling up Masked Diffusion Models on Text" by the GSAI-ML team. [arXiv:2410.18514](https://arxiv.org/abs/2410.18514)
+- **LLaDA**: "Large Language Diffusion Models" [arXiv:2502.09992](https://arxiv.org/abs/2502.09992)
+- **SMDM**: "Scaling up Masked Diffusion Models on Text" [arXiv:2410.18514](https://arxiv.org/abs/2410.18514)
 
 ### Original Codebases
 
-- **LLaDA**: [GSAI-ML/LLaDA](https://github.com/GSAI-ML/LLaDA)
-- **SMDM**: [GSAI-ML/SMDM](https://github.com/GSAI-ML/SMDM)
+- **LLaDA**: [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA)
+- **SMDM**: [ML-GSAI/SMDM](https://github.com/ML-GSAI/SMDM)
 
 ## Acknowledgments
 
 This implementation is inspired by and adapted from:
 
-1. The original LLaDA paper and implementation by GSAI-ML
+1. The original LLaDA paper and implementation by ML-GSAI
 2. The SMDM simplified approach for educational purposes
 3. The Hugging Face Transformers library for model loading and tokenization
 4. The Weights & Biases platform for experiment tracking
@@ -106,4 +106,4 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 
 ## Disclaimer
 
-This is an educational implementation intended for learning and research purposes. For production use, please refer to the official LLaDA implementation by GSAI-ML. 
+This is an educational implementation intended for learning and research purposes. For production use, please refer to the official LLaDA implementation by ML-GSAI.
