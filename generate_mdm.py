@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--gen_length",
         type=int,
-        default=128,
+        default=256,
         help="Generated answer length.",
     )
     p.add_argument(
@@ -70,48 +70,70 @@ def parse_args() -> argparse.Namespace:
         default="low_confidence",
         help="Remasking strategy.",
     )
+    p.add_argument(
+        "--num_return_sequences",
+        type=int,
+        default=1,
+        help="Number of sequences to generate per prompt.",
+    )
     return p.parse_args()
 
 
 def add_gumbel_noise(logits, temperature):
-    '''
+    """
     The Gumbel max is a method for sampling categorical distributions.
     According to arXiv:2409.02908, for MDM, low-precision Gumbel Max improves perplexity score but reduces generation quality.
     Thus, we use float64.
-    '''
+    """
     if temperature == 0:
         return logits
-    logits = logits.to(torch.float64)
-    noise = torch.rand_like(logits, dtype=torch.float64)
-    gumbel_noise = (- torch.log(noise)) ** temperature
+    # logits = logits.to(torch.float64)
+    # noise = torch.rand_like(logits, dtype=torch.float64)
+    noise = torch.rand_like(logits)
+    gumbel_noise = (-torch.log(noise)) ** temperature
     return logits.exp() / gumbel_noise
 
 
 def get_num_transfer_tokens(mask_index, steps):
-    '''
+    """
     In the reverse process, the interval [0, 1] is uniformly discretized into steps intervals.
     Furthermore, because LLaDA employs a linear noise schedule (as defined in Eq. (8)),
     the expected number of tokens transitioned at each step should be consistent.
 
     This function is designed to precompute the number of tokens that need to be transitioned at each step.
-    '''
+    """
     mask_num = mask_index.sum(dim=1, keepdim=True)
 
     base = mask_num // steps
     remainder = mask_num % steps
 
-    num_transfer_tokens = torch.zeros(mask_num.size(0), steps, device=mask_index.device, dtype=torch.int64) + base
+    num_transfer_tokens = (
+        torch.zeros(
+            mask_num.size(0), steps, device=mask_index.device, dtype=torch.int64
+        )
+        + base
+    )
 
     for i in range(mask_num.size(0)):
-        num_transfer_tokens[i, :remainder[i]] += 1
+        num_transfer_tokens[i, : remainder[i]] += 1
 
     return num_transfer_tokens
 
 
 @torch.no_grad()
-def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336):
-    '''
+def generate(
+    model,
+    prompt,
+    steps=128,
+    gen_length=128,
+    block_length=128,
+    temperature=0.0,
+    cfg_scale=0.0,
+    remasking="low_confidence",
+    mask_id=126336,
+    num_return_sequences=1,
+):
+    """
     Args:
         model: Mask predictor.
         prompt: A tensor of shape (1, L).
@@ -122,11 +144,18 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
         cfg_scale: Unsupervised classifier-free guidance scale.
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
-    '''
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
-    x[:, :prompt.shape[1]] = prompt.clone()
+        num_return_sequences: Number of sequences to generate per prompt.
+    """
+    if num_return_sequences > 1:
+        prompt = prompt.repeat(num_return_sequences, 1)
 
-    prompt_index = (x != mask_id)
+    print("mask_id: ", mask_id)
+    x = torch.full(
+        (prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long
+    ).to(model.device)
+    x[:, : prompt.shape[1]] = prompt.clone()
+
+    prompt_index = x != mask_id
 
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
@@ -135,12 +164,14 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
     steps = steps // num_blocks
 
     for num_block in range(num_blocks):
-        block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (
-                num_block + 1) * block_length:] == mask_id)
+        block_mask_index = (
+            x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:,]
+            == mask_id
+        )
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         for i in range(steps):
-            mask_index = (x == mask_id)
-            if cfg_scale > 0.:
+            mask_index = x == mask_id
+            if cfg_scale > 0.0:
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
@@ -153,11 +184,12 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
-            if remasking == 'low_confidence':
+            if remasking == "low_confidence":
                 p = F.softmax(logits, dim=-1)
                 x0_p = torch.squeeze(
-                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)  # b, l
-            elif remasking == 'random':
+                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
+                )  # b, l
+            elif remasking == "random":
                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
             else:
                 raise NotImplementedError(remasking)
@@ -179,23 +211,29 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
 def main():
     args = parse_args()
 
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_built() else 'cpu'
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_built() else "cpu"
+    )
     print(f"Using device: {device}")
 
-    config = Config.from_name(f"Diff_LLaMA_{args.model}")
+    config = Config.from_name(f"LLaMA_{args.model}")
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        "meta-llama/Llama-2-7b-hf", trust_remote_code=True
+    )
     config.vocab_size = tokenizer.vocab_size
     print(f"Vocab size: {config.vocab_size}")
 
-    model = TransEncoder(config).to(device)
+    model = TransEncoder(config, is_causal=False).to(device)
 
     checkpoint = torch.load(args.ckpt_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     print(f"Loaded checkpoint from step {checkpoint.get('step', 'unknown')}")
     model.eval()
 
-    input_ids = tokenizer(args.prompt)['input_ids']
+    input_ids = tokenizer(args.prompt)["input_ids"]
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
     print(f"Prompt: {args.prompt}")
 
@@ -209,12 +247,19 @@ def main():
         temperature=args.temperature,
         cfg_scale=args.cfg_scale,
         remasking=args.remasking,
-        mask_id=config.vocab_size
+        mask_id=config.vocab_size,
+        num_return_sequences=args.num_return_sequences,
     )
 
-    generated_text = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0]
-    print(f"Generated: {generated_text}")
+    generated_text = tokenizer.batch_decode(out, skip_special_tokens=True)
+
+    if args.num_return_sequences == 1:
+        print(f"Generated: {generated_text[0]}")
+    else:
+        for i, text in enumerate(generated_text):
+            print("-" * 100)
+            print(f"Generated {i + 1}: {text}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

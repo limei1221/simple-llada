@@ -47,7 +47,7 @@ python pretrain_mdm.py --model 85M --batch_size 16
 Generate text using a trained model:
 
 ```bash
-python generate.py --model 85M --ckpt_path checkpoints/step_0010000.pth
+python generate_mdm.py --model 85M --ckpt_path checkpoints/step_0106000.pth
 ```
 
 ## Model Architecture

@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 import wandb
 from config import Config
-from generate import generate
+from generate_mdm import generate
 from model import TransEncoder
 
 
@@ -31,14 +31,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--flops",
         type=float,
-        default=0.1,
+        default=1,
         help="Target training compute in 10^18 FLOPs.",
     )
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=5,
+        default=1,
         help="Number of steps to accumulate gradients before updating weights.",
     )
     p.add_argument("--seed", type=int, default=3407)
@@ -191,7 +191,9 @@ def forward_process(batch, total_dim=32000, eps=1e-3):
     return noisy_batch, mask_indices, p_mask
 
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    "meta-llama/Llama-2-7b-hf", trust_remote_code=True
+)
 tokenizer.pad_token = tokenizer.eos_token
 
 
@@ -236,7 +238,7 @@ def count_embedding_parameters(model: TransEncoder) -> int:
 
 
 def get_lr(
-    step: int, warmup: int, total: int, base_lr: float = 5e-4, min_lr: float = 5e-5
+    step: int, warmup: int, total: int, base_lr: float = 4e-4, min_lr: float = 4e-5
 ) -> float:
     if step < warmup:
         return base_lr * step / warmup
@@ -279,7 +281,7 @@ def train():
         log_file,
     )
 
-    config = Config.from_name(f"Diff_LLaMA_{args.model}")
+    config = Config.from_name(f"LLaMA_{args.model}")
     log_message(f"[INFO] Block size: {config.block_size}", log_file)
     config.vocab_size = tokenizer.vocab_size
     log_message(f"[INFO] Vocab size: {config.vocab_size}", log_file)
@@ -320,17 +322,31 @@ def train():
         )
 
     log_message(f"[INFO] Total parameters: {total_params / 1e6:.2f}M", log_file)
-    log_message(f"[INFO] Non-embedding parameters: {non_embedding_params / 1e6:.2f}M", log_file)
+    log_message(
+        f"[INFO] Non-embedding parameters: {non_embedding_params / 1e6:.2f}M", log_file
+    )
 
-    dataset = load_dataset("HuggingFaceFW/fineweb", split="train", streaming=True, token=True)
     # dataset = load_dataset("openwebtext", split="train", streaming=True, trust_remote_code=True)
+    # dataset = load_dataset("HuggingFaceFW/fineweb", split="train", streaming=True)
+
+    dataset_name = "cerebras/SlimPajama-627B"
+    train_dataset = load_dataset(dataset_name, split="train", streaming=True)
+    val_dataset = load_dataset(dataset_name, split="validation", streaming=True)
+    log_message(f"[INFO] Dataset: {dataset_name}", log_file)
 
     train_loader = make_loader(
-        dataset, batch_size=args.batch_size, seq_len=config.block_size
+        train_dataset,
+        batch_size=args.batch_size,
+        seq_len=config.block_size,
+    )
+    val_loader = make_loader(
+        val_dataset,
+        batch_size=args.batch_size,
+        seq_len=config.block_size,
     )
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=5e-4, betas=(0.9, 0.95), weight_decay=0.1
+        model.parameters(), lr=4e-4, betas=(0.9, 0.95), weight_decay=0.1
     )
 
     est_tokens_per_step = args.batch_size * config.block_size
@@ -354,12 +370,16 @@ def train():
                     "non_embedding_params": non_embedding_params,
                     "tokens_per_step": est_tokens_per_step,
                     "flops_per_token": est_flops_per_token,
-                    "total_flops": est_flops_per_token * est_tokens_per_step * total_steps,
+                    "total_flops": est_flops_per_token
+                                   * est_tokens_per_step
+                                   * total_steps,
                 },
             }
         )
 
     step = 0
+    best_val_loss = float("inf")
+
     if args.resume_from:
         try:
             step = load_checkpoint(args.resume_from, model, optimizer, device)
@@ -419,7 +439,8 @@ def train():
 
                     if not args.no_wandb:
                         log_data = {
-                            "train/loss": loss.item() * args.gradient_accumulation_steps,
+                            "train/loss": loss.item()
+                                          * args.gradient_accumulation_steps,
                             "train/learning_rate": lr,
                             "train/step": step,
                             "train/mask_ratio": mask_indices.float().mean().item(),
@@ -444,25 +465,79 @@ def train():
                     )
 
                 if step % args.eval_every == 0:
-                    validate(model, device, config.vocab_size, log_file, args.no_wandb)
+                    val_loss = validate(
+                        model,
+                        val_loader,
+                        device,
+                        config.vocab_size,
+                        log_file,
+                        args.no_wandb,
+                    )
+                    log_message(f"[val] val_loss: {val_loss:.4f}", log_file)
+                    if not args.no_wandb:
+                        wandb.log(
+                            {
+                                "val/val_loss": val_loss,
+                                "val/step": step,
+                            }
+                        )
 
-                    cleanup_old_checkpoints(args.out_dir, keep_latest=True)
+                    is_best = val_loss < best_val_loss
+                    if is_best:
+                        best_val_loss = val_loss
 
-                    ckpt_path = args.out_dir / f"step_{step:07d}.pth"
-                    save_checkpoint(model, optimizer, step, ckpt_path)
-                    log_message(f"[ckpt] saved model to {ckpt_path}", log_file)
+                        cleanup_old_checkpoints(args.out_dir, keep_latest=True)
+
+                        ckpt_path = args.out_dir / f"step_{step:07d}.pth"
+                        save_checkpoint(model, optimizer, step, ckpt_path)
+                        log_message(f"[ckpt] saved model to {ckpt_path}", log_file)
 
     if not args.no_wandb:
         wandb.finish()
 
 
-def validate(model, device, vocab_size: int, log_file: Path, no_wandb: bool) -> None:
-    """Generate sample text using the current model state."""
+def validate(
+    model, val_loader, device, vocab_size: int, log_file: Path, no_wandb: bool
+) -> float:
+    """Calculate validation loss and generate sample text using the current model state.
+
+    Returns:
+        float: Average validation loss
+    """
     model.eval()
+    total_val_loss = 0.0
+    num_batches = 0
+
     with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch["input_ids"].to(device)
+
+            noisy_input, mask_indices, p_mask = forward_process(
+                input_ids, total_dim=vocab_size
+            )
+
+            logits = model(noisy_input)  # (B,T,V)
+            loss = (
+                F.cross_entropy(
+                    logits[mask_indices],
+                    input_ids[mask_indices],
+                    reduction="none",
+                )
+                / p_mask[mask_indices]
+            )
+            loss = loss.sum() / (input_ids.shape[0] * input_ids.shape[1])
+
+            total_val_loss += loss.item()
+            num_batches += 1
+
+            if num_batches >= 10:
+                break
+
+        avg_val_loss = total_val_loss / num_batches if num_batches > 0 else 0.0
+
         prompt_text = "Once upon a time,"
 
-        input_ids = tokenizer(prompt_text)['input_ids']
+        input_ids = tokenizer(prompt_text)["input_ids"]
         input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
 
         out = generate(
@@ -484,11 +559,14 @@ def validate(model, device, vocab_size: int, log_file: Path, no_wandb: bool) -> 
         if not no_wandb:
             wandb.log(
                 {
-                    "val/generated_text": generated_text,
+                    "val/generated_text": wandb.Html(
+                        f"<p><strong>Generated:</strong> {generated_text}</p>"
+                    ),
                 }
             )
 
     model.train()
+    return avg_val_loss
 
 
 if __name__ == "__main__":

@@ -30,15 +30,15 @@ class Config:
     @classmethod
     def from_name(cls, name: str) -> "Config":
         if (
-            name == "Diff_LLaMA_34M"
+            name == "LLaMA_34M"
         ):  # 25M non-embedding parameters (34M model in SMDM paper, Table 8)
             return cls(n_layer=8, n_head=8, n_embd=512, n_query_groups=1, block_size=1024)
         if (
-            name == "Diff_LLaMA_85M"
-        ):  # 85M non-embedding parameters
+            name == "LLaMA_85M"
+        ):  # 85M non-embedding parameters (113M model in SMDM paper, Table 8)
             return cls(n_layer=12, n_head=12, n_embd=768, n_query_groups=1, block_size=1024)
         if (
-            name == "Diff_LLaMA_1B"
+            name == "LLaMA_1B"
         ):  # 946M non-embedding parameters (1B model in LLaDA paper, Table 5)
             return cls(n_layer=22, n_head=32, n_embd=2048, n_query_groups=8, block_size=4096)
         raise ValueError(name)
