@@ -1,8 +1,76 @@
-import torch
-import numpy as np
-import torch.nn.functional as F
+# Modified from https://github.com/ML-GSAI/LLaDA/blob/main/generate.py
 
-from transformers import AutoTokenizer, AutoModel
+import argparse
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer
+
+from config import Config
+from model import TransEncoder
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--ckpt_path",
+        type=Path,
+        required=True,
+        help="Path to checkpoint file to load.",
+    )
+    p.add_argument(
+        "--model",
+        type=str,
+        choices=["34M", "85M", "1B"],
+        required=True,
+        help="Model size - must match the checkpoint.",
+    )
+    p.add_argument(
+        "--prompt",
+        type=str,
+        default="Once upon a time, there was a little girl",
+        help="Text prompt for generation.",
+    )
+    p.add_argument(
+        "--steps",
+        type=int,
+        default=128,
+        help="Number of sampling steps.",
+    )
+    p.add_argument(
+        "--gen_length",
+        type=int,
+        default=128,
+        help="Generated answer length.",
+    )
+    p.add_argument(
+        "--block_length",
+        type=int,
+        default=32,
+        help="Block length for semi-autoregressive remasking.",
+    )
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature.",
+    )
+    p.add_argument(
+        "--cfg_scale",
+        type=float,
+        default=0.0,
+        help="Classifier-free guidance scale.",
+    )
+    p.add_argument(
+        "--remasking",
+        type=str,
+        choices=["low_confidence", "random"],
+        default="low_confidence",
+        help="Remasking strategy.",
+    )
+    return p.parse_args()
 
 
 def add_gumbel_noise(logits, temperature):
@@ -40,7 +108,7 @@ def get_num_transfer_tokens(mask_index, steps):
     return num_transfer_tokens
 
 
-@ torch.no_grad()
+@torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
              cfg_scale=0., remasking='low_confidence', mask_id=126336):
     '''
@@ -67,7 +135,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
     steps = steps // num_blocks
 
     for num_block in range(num_blocks):
-        block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
+        block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (
+                num_block + 1) * block_length:] == mask_id)
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         for i in range(steps):
             mask_index = (x == mask_id)
@@ -75,19 +144,19 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_).logits
+                logits = model(x_)
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x).logits
+                logits = model(x)
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
             if remasking == 'low_confidence':
                 p = F.softmax(logits, dim=-1)
                 x0_p = torch.squeeze(
-                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)  # b, l
             elif remasking == 'random':
                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
             else:
@@ -108,22 +177,43 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
 
 
 def main():
-    device = 'cuda'
+    args = parse_args()
 
-    model = AutoModel.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_built() else 'cpu'
+    print(f"Using device: {device}")
 
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. How many kilometers can she run in 8 hours?"
+    config = Config.from_name(f"Diff_LLaMA_{args.model}")
 
-    # Add special tokens for the Instruct model. The Base model does not require the following two lines.
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+    config.vocab_size = tokenizer.vocab_size
+    print(f"Vocab size: {config.vocab_size}")
 
-    input_ids = tokenizer(prompt)['input_ids']
+    model = TransEncoder(config).to(device)
+
+    checkpoint = torch.load(args.ckpt_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Loaded checkpoint from step {checkpoint.get('step', 'unknown')}")
+    model.eval()
+
+    input_ids = tokenizer(args.prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
+    print(f"Prompt: {args.prompt}")
 
-    out = generate(model, input_ids, steps=128, gen_length=128, block_length=32, temperature=0., cfg_scale=0., remasking='low_confidence')
-    print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
+    print("Generating...")
+    out = generate(
+        model,
+        input_ids,
+        steps=args.steps,
+        gen_length=args.gen_length,
+        block_length=args.block_length,
+        temperature=args.temperature,
+        cfg_scale=args.cfg_scale,
+        remasking=args.remasking,
+        mask_id=config.vocab_size
+    )
+
+    generated_text = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0]
+    print(f"Generated: {generated_text}")
 
 
 if __name__ == '__main__':

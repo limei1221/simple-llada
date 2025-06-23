@@ -39,11 +39,7 @@ pip install -r requirements.txt
 Train a model with different sizes:
 
 ```bash
-# Train a 6M parameter model
-python pretrain.py --model 6M --batch_size 32 --memory_efficient
-
-# Resume training from 19M checkpoint
-python pretrain.py --model 19M --batch_size 32 --memory_efficient --resume_from checkpoints/step_0001000.pth
+python pretrain_mdm.py --model 85M --batch_size 16
 ```
 
 ### Generation
@@ -51,7 +47,7 @@ python pretrain.py --model 19M --batch_size 32 --memory_efficient --resume_from 
 Generate text using a trained model:
 
 ```bash
-python generate.py
+python generate.py --model 85M --ckpt_path checkpoints/step_0010000.pth
 ```
 
 ## Model Architecture
@@ -62,16 +58,6 @@ The implementation uses a simplified Transformer encoder architecture:
 - **Group Query Attention**: Efficient attention mechanism with grouped queries
 - **Mask Token Handling**: Special handling for the [MASK] token
 - **Linear Noise Schedule**: Linear noise scheduling for the diffusion process
-
-## Configuration
-
-Model configurations are defined in `pretrain.py`. The parameter counts (e.g., 6M) refer to the total parameters excluding embedding parameters:
-
-- **6M**: 6 layers, 6 heads, 384 dimensions
-- **19M**: 12 layers, 12 heads, 512 dimensions  
-- **34M**: 16 layers, 16 heads, 640 dimensions
-- **1B**: 24 layers, 24 heads, 1024 dimensions
-
 
 ## Citations
 
@@ -87,22 +73,9 @@ This implementation is based on the following research papers and codebases:
 - **LLaDA**: [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA)
 - **SMDM**: [ML-GSAI/SMDM](https://github.com/ML-GSAI/SMDM)
 
-## Acknowledgments
-
-This implementation is inspired by and adapted from:
-
-1. The original LLaDA paper and implementation by ML-GSAI
-2. The SMDM simplified approach for educational purposes
-3. The Hugging Face Transformers library for model loading and tokenization
-4. The Weights & Biases platform for experiment tracking
-
 ## License
 
 This project is released under the same license as the original LLaDA implementation. Please refer to the original repositories for specific licensing information.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests to improve this educational implementation.
 
 ## Disclaimer
 
