@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoTokenizer
 
 import wandb
@@ -179,22 +179,45 @@ def save_checkpoint(
     torch.save(checkpoint, checkpoint_path)
 
 
-def forward_process(batch, total_dim=32000, eps=1e-3):
-    b, l = batch.shape
-    t = torch.rand((b,), device=batch.device)
-
-    p_mask = (1 - eps) * t + eps
-    p_mask = p_mask[:, None].repeat(1, l)
-
-    mask_indices = torch.rand((b, l), device=batch.device) < p_mask
-    noisy_batch = torch.where(mask_indices, total_dim, batch)
-    return noisy_batch, mask_indices, p_mask
-
-
 tokenizer = AutoTokenizer.from_pretrained(
     "meta-llama/Llama-2-7b-hf", trust_remote_code=True
 )
 tokenizer.pad_token = tokenizer.eos_token
+
+
+class PackedDataset(IterableDataset):
+    """
+    Streams examples from a (typically streaming) HF dataset and packs them
+    into fixed-length blocks without padding.  Each document is terminated
+    with `eos_id` so that the autoregressive loss never spans documents.
+    """
+    def __init__(self, ds, tokenizer, seq_len: int, eos_id: int | None = None):
+        self.ds = ds
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.eos_id = eos_id if eos_id is not None else tokenizer.eos_token_id
+
+    def __iter__(self):
+        buf: list[int] = []
+        for ex in self.ds:
+            # 1. tokenize WITHOUT padding / truncation
+            ids = self.tokenizer(
+                ex["text"],
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )["input_ids"]
+
+            # 2. add to buffer, terminate with <eos>
+            buf.extend(ids + [self.eos_id])
+
+            # 3. emit as many full blocks as we now have
+            while len(buf) >= self.seq_len:
+                chunk = buf[: self.seq_len]
+                buf = buf[self.seq_len :]        # keep remainder
+                yield {
+                    "input_ids": torch.tensor(chunk, dtype=torch.long),
+                    "attention_mask": torch.ones(self.seq_len, dtype=torch.long),
+                }
 
 
 def tokenize(batch, *, seq_len: int):
@@ -207,13 +230,16 @@ def tokenize(batch, *, seq_len: int):
     )
 
 
-def make_loader(ds, *, batch_size: int, seq_len: int) -> DataLoader:
-    ds = ds.map(
-        tokenize,
-        batched=True,
-        fn_kwargs={"seq_len": seq_len},
-        remove_columns=ds.column_names,
-    )
+def make_loader(ds, *, batch_size: int, seq_len: int, pack: bool = False) -> DataLoader:
+    if pack:
+        ds = PackedDataset(ds, tokenizer, seq_len)
+    else:
+        ds = ds.map(
+            tokenize,
+            batched=True,
+            fn_kwargs={"seq_len": seq_len},
+            remove_columns=ds.column_names,
+        )
 
     return DataLoader(
         ds,
@@ -338,11 +364,13 @@ def train():
         train_dataset,
         batch_size=args.batch_size,
         seq_len=config.block_size,
+        pack=True,
     )
     val_loader = make_loader(
         val_dataset,
         batch_size=args.batch_size,
-        seq_len=config.block_size,
+        seq_len=128,
+        pack=False,
     )
 
     optimizer = torch.optim.AdamW(
@@ -352,6 +380,7 @@ def train():
     est_tokens_per_step = args.batch_size * config.block_size
     est_flops_per_token = 6 * non_embedding_params  # transformer rule-of-thumb
     total_steps = int((args.flops * 1e18) / (est_flops_per_token * est_tokens_per_step))
+    total_steps -= total_steps % args.eval_every
     total_steps = max(total_steps, 1000)
 
     warmup = max(100, total_steps // 100)

@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--prompt",
         type=str,
-        default="Once upon a time, there was a little girl",
+        default="Once upon a time,",
         help="Text prompt for generation.",
     )
     p.add_argument(
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--gen_length",
         type=int,
-        default=256,
+        default=128,
         help="Generated answer length.",
     )
     p.add_argument(
