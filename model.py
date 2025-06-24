@@ -41,6 +41,23 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     return torch.stack((x_rope_even, x_rope_odd), dim=-1).flatten(-2)
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization.
+
+    RMSNorm normalizes by RMS only, without mean centering.
+    This is more computationally efficient than LayerNorm.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x * rms * self.weight
+
+
 class MLP(nn.Module):
     """GELU MLP used in the original GPT and LLaMA models."""
 
@@ -115,9 +132,9 @@ class Block(nn.Module):
         bias: bool,
     ) -> None:
         super().__init__()
-        self.ln1 = nn.LayerNorm(n_embd, eps=norm_eps)
+        self.ln1 = RMSNorm(n_embd, eps=norm_eps)
         self.attn = SelfAttention(n_embd, n_head, n_query_groups, bias)
-        self.ln2 = nn.LayerNorm(n_embd, eps=norm_eps)
+        self.ln2 = RMSNorm(n_embd, eps=norm_eps)
         self.mlp = MLP(n_embd, intermediate_size, bias)
 
     def forward(self, x: torch.Tensor, rope: RoPECache, is_causal: bool) -> torch.Tensor:
@@ -147,7 +164,7 @@ class TransEncoder(nn.Module):
             )
             for _ in range(config.n_layer)
         )
-        self.ln_f = nn.LayerNorm(config.n_embd, eps=config.norm_eps)
+        self.ln_f = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.register_buffer("_rope_cos", None, persistent=False)
